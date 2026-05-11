@@ -1,0 +1,99 @@
+name: prebuild
+
+# Runs on tag push (v0.1.0, v1.2.3-rc.1, etc.) to build native prebuilds for
+# all supported platforms and publish the package to npm. Also runnable
+# manually for ad-hoc prebuild artifact generation.
+#
+# Requires repo secret NPM_TOKEN (an npm automation token with publish scope).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  prebuild:
+    name: prebuild (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is Apple silicon; clang cross-compiles arm64 + x64
+          # in a single runner using -arch flags handled by node-gyp.
+          - os: macos-latest
+            archs: arm64 x64
+          - os: windows-latest
+            archs: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps (no postinstall)
+        run: npm ci --ignore-scripts
+
+      - name: Build prebuilds
+        shell: bash
+        run: |
+          for a in ${{ matrix.archs }}; do
+            echo "::group::prebuildify --arch $a"
+            npx prebuildify --napi --strip --arch "$a"
+            echo "::endgroup::"
+          done
+          echo "---- artifacts ----"
+          find prebuilds -type f
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilds-${{ matrix.os }}
+          path: prebuilds/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish to npm
+    needs: prebuild
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all prebuilds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: prebuilds-*
+          path: prebuilds
+          merge-multiple: true
+
+      - name: Show prebuild layout
+        run: |
+          echo "Prebuilds bundled in tarball:"
+          find prebuilds -type f
+
+      - name: Install runtime deps (no build)
+        run: npm ci --ignore-scripts --omit=dev
+
+      - name: Verify package.json version matches tag
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag v$tag does not match package.json version $pkg"
+            exit 1
+          fi
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

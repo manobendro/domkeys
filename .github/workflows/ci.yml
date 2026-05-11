@@ -1,0 +1,38 @@
+name: ci
+
+# Lightweight per-PR verification: compile the native addon and run the
+# converter smoke test on each supported host platform. The live keyboard
+# hook can't be exercised here (no Accessibility permission on CI runners,
+# no foreground window on Windows) — the smoke test covers the conversion
+# layer, which is the part that benefits from CI.
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }} / node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        node: ['18', '20', '22']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install (compile from source)
+        run: npm ci
+
+      - name: Smoke test (conversion table)
+        run: npm test

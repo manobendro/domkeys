@@ -1,0 +1,79 @@
+{
+  "name": "domkeys",
+  "version": "0.1.0",
+  "description": "Native Node.js NAPI keyboard hook (macOS + Windows) with Chromium-style keycode conversion.",
+  "author": {
+    "name": "Manob Biswas",
+    "email": "manob7@hotmail.com",
+    "url": "https://github.com/manobendro"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/manobendro/domkeys.git"
+  },
+  "bugs": {
+    "url": "https://github.com/manobendro/domkeys/issues"
+  },
+  "homepage": "https://github.com/manobendro/domkeys#readme",
+  "keywords": [
+    "keyboard",
+    "keyboard-hook",
+    "keyboard-events",
+    "keypress",
+    "keycode",
+    "dom",
+    "keyboardevent",
+    "napi",
+    "node-addon-api",
+    "electron",
+    "global-shortcut",
+    "hotkey",
+    "text-expansion",
+    "macos",
+    "windows",
+    "chromium"
+  ],
+  "main": "lib/index.js",
+  "types": "index.d.ts",
+  "files": [
+    "binding.gyp",
+    "src/",
+    "lib/",
+    "prebuilds/",
+    "index.d.ts",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "install": "node-gyp-build",
+    "rebuild": "node-gyp rebuild",
+    "build": "node-gyp configure build",
+    "clean": "node-gyp clean",
+    "prebuild": "prebuildify --napi --strip",
+    "test": "node test/smoke.js",
+    "test:manual": "node test/manual.js"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.2.0",
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.2.0",
+    "prebuildify": "^6.0.1"
+  },
+  "binary": {
+    "napi_versions": [8]
+  },
+  "os": [
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "BSD-3-Clause"
+}
