@@ -81,8 +81,9 @@ jobs:
           echo "Prebuilds bundled in tarball:"
           find prebuilds -type f
 
-      - name: Install runtime deps (no build)
-        run: npm ci --ignore-scripts --omit=dev
+      # No `npm ci` here — `npm publish` needs only package.json + the files
+      # listed in `files`, and node_modules can't install on Linux because
+      # package.json restricts os/cpu to mac+win.
 
       - name: Verify package.json version matches tag
         run: |
