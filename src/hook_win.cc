@@ -62,16 +62,25 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (!non_text.empty()) {
     ev.key = non_text;
   } else if (ev.is_down) {
-    // The taskbar/Win+Space switcher calls ActivateKeyboardLayout with
-    // KLF_REORDER, which moves the just-activated HKL to the head of
-    // GetKeyboardLayoutList. TSF-heavy hosts (Windows Terminal, modern
-    // Electron) don't always update the legacy per-thread HKL via
-    // WM_INPUTLANGCHANGE, so the list head is the most reliable signal
-    // of the current input language. Fall back to the foreground thread,
-    // then to our own thread, if the list query fails.
+    // The kernel's scan->VK translation already encodes which layout was
+    // active when the keystroke was produced: AZERTY maps scan 0x34 to
+    // VK_OEM_2 where US maps it to VK_OEM_PERIOD, etc. So the most
+    // reliable way to identify the kernel's current layout is to walk
+    // the loaded HKLs and find the one whose own scan->VK mapping
+    // matches kb->vkCode. This works even when the foreground app's
+    // per-thread legacy HKL is stale (typing into Notepad while the
+    // taskbar switch only updated Chrome's thread) and when
+    // GetKeyboardLayoutList isn't reordered for our process.
     HKL layouts[16] = {0};
     int n_layouts = GetKeyboardLayoutList(16, layouts);
-    HKL layout = (n_layouts > 0) ? layouts[0] : nullptr;
+    HKL layout = nullptr;
+    for (int i = 0; i < n_layouts; ++i) {
+      if (MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]) ==
+          kb->vkCode) {
+        layout = layouts[i];
+        break;
+      }
+    }
     if (!layout) {
       HWND fg = GetForegroundWindow();
       if (fg) {
