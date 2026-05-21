@@ -62,13 +62,31 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (!non_text.empty()) {
     ev.key = non_text;
   } else if (ev.is_down) {
-    // Layout + state must come from the *foreground* app, not our hook
-    // thread — otherwise layout switches in the user's app are invisible.
+    // The kernel's scan->VK translation already encodes which layout was
+    // active when the keystroke was produced: AZERTY maps scan 0x34 to
+    // VK_OEM_2 where US maps it to VK_OEM_PERIOD, etc. So the most
+    // reliable way to identify the kernel's current layout is to walk
+    // the loaded HKLs and find the one whose own scan->VK mapping
+    // matches kb->vkCode. This works even when the foreground app's
+    // per-thread legacy HKL is stale (typing into Notepad while the
+    // taskbar switch only updated Chrome's thread) and when
+    // GetKeyboardLayoutList isn't reordered for our process.
+    HKL layouts[16] = {0};
+    int n_layouts = GetKeyboardLayoutList(16, layouts);
     HKL layout = nullptr;
-    HWND fg = GetForegroundWindow();
-    if (fg) {
-      DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
-      if (fg_tid) layout = GetKeyboardLayout(fg_tid);
+    for (int i = 0; i < n_layouts; ++i) {
+      if (MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]) ==
+          kb->vkCode) {
+        layout = layouts[i];
+        break;
+      }
+    }
+    if (!layout) {
+      HWND fg = GetForegroundWindow();
+      if (fg) {
+        DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
+        if (fg_tid) layout = GetKeyboardLayout(fg_tid);
+      }
     }
     if (!layout) layout = GetKeyboardLayout(0);
 
