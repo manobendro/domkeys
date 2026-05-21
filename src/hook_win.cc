@@ -92,11 +92,22 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (GetKeyState(VK_NUMLOCK) & 0x0001) keystate[VK_NUMLOCK] |= 0x01;
     if (GetKeyState(VK_SCROLL)  & 0x0001) keystate[VK_SCROLL]  |= 0x01;
 
+    // vkCode in KBDLLHOOKSTRUCT comes from the kernel's scan->VK mapping
+    // using *our* process's keyboard layout (typically US), not the
+    // foreground app's active layout. For VK_A..VK_Z that's harmless
+    // (those codes are universal). For layout-specific OEM VKs
+    // (VK_OEM_PERIOD, VK_OEM_2, VK_OEM_3 ...) it breaks symbols, because
+    // AZERTY/QWERTZ/etc. assign different OEM codes to the same physical
+    // keys. Re-translate the hardware scan code through the active HKL
+    // so the VK we hand to ToUnicodeEx matches the layout it'll consult.
+    UINT translated_vk = MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layout);
+    if (translated_vk == 0) translated_vk = kb->vkCode;
+
     // Bit 2 in wFlags (Win10 1607+) = "do not change kernel keyboard state".
     // Critical: without this we'd consume the foreground app's pending dead
     // key on layouts like US-International, breaking composition there.
     wchar_t buf[8] = {0};
-    int n = ToUnicodeEx(kb->vkCode, kb->scanCode, keystate, buf,
+    int n = ToUnicodeEx(translated_vk, kb->scanCode, keystate, buf,
                         sizeof(buf) / sizeof(buf[0]), 1 << 2, layout);
     if (n > 0) {
       char utf8[32] = {0};
