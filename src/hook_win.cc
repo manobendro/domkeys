@@ -62,13 +62,22 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (!non_text.empty()) {
     ev.key = non_text;
   } else if (ev.is_down) {
-    // Layout + state must come from the *foreground* app, not our hook
-    // thread — otherwise layout switches in the user's app are invisible.
-    HKL layout = nullptr;
-    HWND fg = GetForegroundWindow();
-    if (fg) {
-      DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
-      if (fg_tid) layout = GetKeyboardLayout(fg_tid);
+    // The taskbar/Win+Space switcher calls ActivateKeyboardLayout with
+    // KLF_REORDER, which moves the just-activated HKL to the head of
+    // GetKeyboardLayoutList. TSF-heavy hosts (Windows Terminal, modern
+    // Electron) don't always update the legacy per-thread HKL via
+    // WM_INPUTLANGCHANGE, so the list head is the most reliable signal
+    // of the current input language. Fall back to the foreground thread,
+    // then to our own thread, if the list query fails.
+    HKL layouts[16] = {0};
+    int n_layouts = GetKeyboardLayoutList(16, layouts);
+    HKL layout = (n_layouts > 0) ? layouts[0] : nullptr;
+    if (!layout) {
+      HWND fg = GetForegroundWindow();
+      if (fg) {
+        DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
+        if (fg_tid) layout = GetKeyboardLayout(fg_tid);
+      }
     }
     if (!layout) layout = GetKeyboardLayout(0);
 
