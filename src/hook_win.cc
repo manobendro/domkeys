@@ -19,6 +19,67 @@ HHOOK g_hook = nullptr;
 EventCallback g_callback;
 std::mutex g_callback_mu;
 
+// Last layout identified by an unambiguous scan->VK fingerprint match.
+// Letters like physical Q (AZERTY->VK_A, US->VK_Q) resolve to exactly one
+// HKL and update this cache; layout-universal keys (digits, space, modifiers)
+// fall back to it for disambiguation.
+std::atomic<HKL> g_layout_cache{nullptr};
+
+// Walks loaded HKLs, finds those whose own scan->VK mapping agrees with
+// kb->vkCode, and picks one. Single match wins outright (and updates the
+// cache). For ambiguous matches (digits / space / other layout-universal
+// keys) we prefer cache -> foreground-thread HKL -> first match.
+HKL PickActiveLayout(WORD vk, UINT scan_full) {
+  HKL layouts[16] = {0};
+  int n_layouts = GetKeyboardLayoutList(16, layouts);
+  if (n_layouts <= 0) return GetKeyboardLayout(0);
+
+  HKL matches[16] = {0};
+  int n_matches = 0;
+  for (int i = 0; i < n_layouts; ++i) {
+    if (MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]) == vk) {
+      matches[n_matches++] = layouts[i];
+    }
+  }
+
+  if (n_matches == 1) {
+    g_layout_cache.store(matches[0]);
+    return matches[0];
+  }
+
+  if (n_matches > 1) {
+    HKL cached = g_layout_cache.load();
+    if (cached) {
+      for (int i = 0; i < n_matches; ++i) {
+        if (matches[i] == cached) return cached;
+      }
+    }
+    HKL fg_hkl = nullptr;
+    HWND fg = GetForegroundWindow();
+    if (fg) {
+      DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
+      if (fg_tid) fg_hkl = GetKeyboardLayout(fg_tid);
+    }
+    if (fg_hkl) {
+      for (int i = 0; i < n_matches; ++i) {
+        if (matches[i] == fg_hkl) return fg_hkl;
+      }
+    }
+    return matches[0];
+  }
+
+  // No fingerprint match (very unlikely). Fall back to the original chain.
+  HWND fg = GetForegroundWindow();
+  if (fg) {
+    DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
+    if (fg_tid) {
+      HKL h = GetKeyboardLayout(fg_tid);
+      if (h) return h;
+    }
+  }
+  return GetKeyboardLayout(0);
+}
+
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (nCode != HC_ACTION) {
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
@@ -62,33 +123,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (!non_text.empty()) {
     ev.key = non_text;
   } else if (ev.is_down) {
-    // The kernel's scan->VK translation already encodes which layout was
-    // active when the keystroke was produced: AZERTY maps scan 0x34 to
-    // VK_OEM_2 where US maps it to VK_OEM_PERIOD, etc. So the most
-    // reliable way to identify the kernel's current layout is to walk
-    // the loaded HKLs and find the one whose own scan->VK mapping
-    // matches kb->vkCode. This works even when the foreground app's
-    // per-thread legacy HKL is stale (typing into Notepad while the
-    // taskbar switch only updated Chrome's thread) and when
-    // GetKeyboardLayoutList isn't reordered for our process.
-    HKL layouts[16] = {0};
-    int n_layouts = GetKeyboardLayoutList(16, layouts);
-    HKL layout = nullptr;
-    for (int i = 0; i < n_layouts; ++i) {
-      if (MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]) ==
-          kb->vkCode) {
-        layout = layouts[i];
-        break;
-      }
-    }
-    if (!layout) {
-      HWND fg = GetForegroundWindow();
-      if (fg) {
-        DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
-        if (fg_tid) layout = GetKeyboardLayout(fg_tid);
-      }
-    }
-    if (!layout) layout = GetKeyboardLayout(0);
+    HKL layout = PickActiveLayout(kb->vkCode, scan_full);
 
     // Reconstruct keyboard state from real-time physical keys instead of
     // reading our thread's stale queue (GetKeyboardState).
@@ -165,6 +200,17 @@ bool StartHook(EventCallback cb) {
   {
     std::lock_guard<std::mutex> lk(g_callback_mu);
     g_callback = std::move(cb);
+  }
+  // Seed the layout cache so the very first keystroke (which might be a
+  // layout-universal key like a digit) has a sensible fallback before any
+  // unambiguous fingerprint match has run.
+  HWND fg = GetForegroundWindow();
+  if (fg) {
+    DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
+    if (fg_tid) {
+      HKL h = GetKeyboardLayout(fg_tid);
+      if (h) g_layout_cache.store(h);
+    }
   }
   g_thread = std::thread(RunHookThread);
   return true;
