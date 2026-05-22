@@ -211,22 +211,16 @@ bool StartHook(EventCallback cb) {
     std::lock_guard<std::mutex> lk(g_callback_mu);
     g_callback = std::move(cb);
   }
-  // Seed the layout cache so the very first keystroke (which might be a
-  // layout-universal key like a digit) has a sensible fallback before any
-  // unambiguous fingerprint match has run.
-  HWND fg = GetForegroundWindow();
-  if (fg) {
-    DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
-    if (fg_tid) {
-      HKL h = GetKeyboardLayout(fg_tid);
-      if (h) g_layout_cache.store(h);
-    }
-  }
+  // Do NOT seed g_layout_cache from a foreground-thread HKL at startup:
+  // that HKL is exactly the value we don't trust (the original bug was
+  // it being stale). A seeded stale value then beats the fresh fg-hkl
+  // lookup at keystroke time for any layout-universal key (digit row,
+  // most letters, space, ...). Leave the cache null; it gets populated
+  // the first time an unambiguous scan->VK fingerprint match identifies
+  // the active layout for real, and ambiguous-key lookups fall back to
+  // the fresh fg-hkl until then.
   if (DebugEnabled()) {
-    HKL seed = g_layout_cache.load();
-    std::fprintf(stderr,
-        "[domkeys] debug enabled; cache seeded with fg-hkl=%p\n",
-        (void*)seed);
+    std::fprintf(stderr, "[domkeys] debug enabled\n");
     std::fflush(stderr);
   }
   g_thread = std::thread(RunHookThread);
