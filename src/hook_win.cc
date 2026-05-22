@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -19,6 +21,14 @@ HHOOK g_hook = nullptr;
 EventCallback g_callback;
 std::mutex g_callback_mu;
 
+bool DebugEnabled() {
+  static const bool enabled = []() {
+    const char* v = std::getenv("DOMKEYS_DEBUG_WIN");
+    return v && v[0] && v[0] != '0';
+  }();
+  return enabled;
+}
+
 // Last layout identified by an unambiguous scan->VK fingerprint match.
 // Letters like physical Q (AZERTY->VK_A, US->VK_Q) resolve to exactly one
 // HKL and update this cache; layout-universal keys (digits, space, modifiers)
@@ -32,7 +42,6 @@ std::atomic<HKL> g_layout_cache{nullptr};
 HKL PickActiveLayout(WORD vk, UINT scan_full) {
   HKL layouts[16] = {0};
   int n_layouts = GetKeyboardLayoutList(16, layouts);
-  if (n_layouts <= 0) return GetKeyboardLayout(0);
 
   HKL matches[16] = {0};
   int n_matches = 0;
@@ -42,42 +51,54 @@ HKL PickActiveLayout(WORD vk, UINT scan_full) {
     }
   }
 
-  if (n_matches == 1) {
-    g_layout_cache.store(matches[0]);
-    return matches[0];
-  }
-
-  if (n_matches > 1) {
-    HKL cached = g_layout_cache.load();
-    if (cached) {
-      for (int i = 0; i < n_matches; ++i) {
-        if (matches[i] == cached) return cached;
-      }
-    }
-    HKL fg_hkl = nullptr;
-    HWND fg = GetForegroundWindow();
-    if (fg) {
-      DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
-      if (fg_tid) fg_hkl = GetKeyboardLayout(fg_tid);
-    }
-    if (fg_hkl) {
-      for (int i = 0; i < n_matches; ++i) {
-        if (matches[i] == fg_hkl) return fg_hkl;
-      }
-    }
-    return matches[0];
-  }
-
-  // No fingerprint match (very unlikely). Fall back to the original chain.
+  HKL cached = g_layout_cache.load();
+  HKL fg_hkl = nullptr;
   HWND fg = GetForegroundWindow();
   if (fg) {
     DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
-    if (fg_tid) {
-      HKL h = GetKeyboardLayout(fg_tid);
-      if (h) return h;
-    }
+    if (fg_tid) fg_hkl = GetKeyboardLayout(fg_tid);
   }
-  return GetKeyboardLayout(0);
+
+  HKL chosen = nullptr;
+  const char* path = nullptr;
+  if (n_matches == 1) {
+    g_layout_cache.store(matches[0]);
+    chosen = matches[0];
+    path = "fingerprint-unique";
+  } else if (n_matches > 1) {
+    if (cached) {
+      for (int i = 0; i < n_matches; ++i) {
+        if (matches[i] == cached) { chosen = cached; path = "cache"; break; }
+      }
+    }
+    if (!chosen && fg_hkl) {
+      for (int i = 0; i < n_matches; ++i) {
+        if (matches[i] == fg_hkl) { chosen = fg_hkl; path = "fg-hkl"; break; }
+      }
+    }
+    if (!chosen) { chosen = matches[0]; path = "first-match"; }
+  } else {
+    chosen = fg_hkl ? fg_hkl : GetKeyboardLayout(0);
+    path = "no-match-fallback";
+  }
+
+  if (DebugEnabled()) {
+    std::fprintf(stderr,
+        "[domkeys] vk=0x%02X scan=0x%04X n_layouts=%d n_matches=%d "
+        "cache=%p fg=%p chosen=%p via=%s ; ",
+        vk, scan_full, n_layouts, n_matches,
+        (void*)cached, (void*)fg_hkl, (void*)chosen, path);
+    std::fprintf(stderr, "layouts=[");
+    for (int i = 0; i < n_layouts; ++i) {
+      UINT v = MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]);
+      std::fprintf(stderr, "%s%p:vk=0x%02X", i ? "," : "",
+                   (void*)layouts[i], v);
+    }
+    std::fprintf(stderr, "]\n");
+    std::fflush(stderr);
+  }
+
+  return chosen;
 }
 
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -211,6 +232,13 @@ bool StartHook(EventCallback cb) {
       HKL h = GetKeyboardLayout(fg_tid);
       if (h) g_layout_cache.store(h);
     }
+  }
+  if (DebugEnabled()) {
+    HKL seed = g_layout_cache.load();
+    std::fprintf(stderr,
+        "[domkeys] debug enabled; cache seeded with fg-hkl=%p\n",
+        (void*)seed);
+    std::fflush(stderr);
   }
   g_thread = std::thread(RunHookThread);
   return true;
