@@ -20,6 +20,14 @@ export interface KeyEvent {
   capsLock: boolean;
   /** True for OS-generated auto-repeat events (macOS only — Windows reports false). */
   repeat: boolean;
+  /**
+   * True if the event was synthesized rather than produced by physical
+   * hardware. Windows: the `LLKHF_INJECTED` flag — SendInput, RDP / VM guest
+   * tools, and key remappers (PowerToys, AutoHotkey) set it. A held modifier
+   * arriving as a stream of down/up pairs is usually injected, so callers can
+   * suppress it with `if (ev.injected) return`. Always `false` on macOS.
+   */
+  injected: boolean;
   /** Raw OS keycode (macOS Carbon VK, or Windows VK on Windows). */
   nativeKeyCode: number;
   /** Windows scan code (with extended-bit prefix); 0 on macOS. */

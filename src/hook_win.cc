@@ -43,6 +43,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
   ev.native_keycode = kb->vkCode;
   ev.native_scancode = scan_full;
+  // Synthetic events (SendInput, RDP/VM guest tools, key remappers). A
+  // held modifier arriving as a stream of down/up pairs is typically
+  // injected — callers can drop these with `if (ev.injected) return`.
+  ev.injected = (kb->flags & LLKHF_INJECTED) != 0;
 
   ev.code = KeycodeConverter::CodeFromWindowsScanCode(scan_full);
   if (ev.code.empty() && extended) {

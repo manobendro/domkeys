@@ -24,6 +24,10 @@ enum class DomCode : uint32_t {
 struct KeyEvent {
   bool is_down = false;
   bool repeat = false;
+  // True if the event was synthesized rather than produced by physical
+  // hardware. Windows: the LLKHF_INJECTED flag (SendInput, RDP/VM guest
+  // tools, key remappers). Defaults false on macOS.
+  bool injected = false;
 
   // Raw OS-level inputs (kept for debugging / user inspection).
   uint32_t native_keycode = 0;   // macOS Carbon VK, or Windows VK
