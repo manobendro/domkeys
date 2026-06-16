@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -18,6 +19,15 @@ DWORD g_thread_id = 0;
 HHOOK g_hook = nullptr;
 EventCallback g_callback;
 std::mutex g_callback_mu;
+
+// SetWindowsHookExW runs on the worker thread, so its success/failure has to
+// be reported back to StartHook before it returns — otherwise a failed install
+// is reported to JS as success and leaves a dead, joinable g_thread that
+// std::terminate()s the process when the next start() reassigns it.
+enum class StartState { kPending, kOk, kFailed };
+std::mutex g_start_mu;
+std::condition_variable g_start_cv;
+StartState g_start_state = StartState::kPending;
 
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (nCode != HC_ACTION) {
@@ -114,6 +124,12 @@ void RunHookThread() {
   g_thread_id = GetCurrentThreadId();
   g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc,
                              GetModuleHandleW(nullptr), 0);
+  // Publish the install result so StartHook can return the real outcome.
+  {
+    std::lock_guard<std::mutex> lk(g_start_mu);
+    g_start_state = g_hook ? StartState::kOk : StartState::kFailed;
+  }
+  g_start_cv.notify_one();
   if (!g_hook) {
     g_running.store(false);
     return;
@@ -137,7 +153,32 @@ bool StartHook(EventCallback cb) {
     std::lock_guard<std::mutex> lk(g_callback_mu);
     g_callback = std::move(cb);
   }
+  {
+    std::lock_guard<std::mutex> lk(g_start_mu);
+    g_start_state = StartState::kPending;
+  }
   g_thread = std::thread(RunHookThread);
+
+  // Block until the worker reports whether the hook actually installed. The
+  // wait also establishes a happens-before edge for g_thread_id / g_hook, so
+  // StopHook can rely on them once we've returned success.
+  bool ok;
+  {
+    std::unique_lock<std::mutex> lk(g_start_mu);
+    g_start_cv.wait(lk, [] { return g_start_state != StartState::kPending; });
+    ok = g_start_state == StartState::kOk;
+  }
+
+  if (!ok) {
+    // The worker has already returned; join it so g_thread isn't left
+    // joinable (a joinable thread reassigned by the next start() aborts).
+    if (g_thread.joinable()) g_thread.join();
+    g_thread_id = 0;
+    g_running.store(false);
+    std::lock_guard<std::mutex> lk(g_callback_mu);
+    g_callback = nullptr;
+    return false;
+  }
   return true;
 }
 
