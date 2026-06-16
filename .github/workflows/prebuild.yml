@@ -22,7 +22,10 @@ jobs:
           # in a single runner using -arch flags handled by node-gyp.
           - os: macos-latest
             archs: arm64 x64
-          - os: windows-latest
+          # windows-2022 (VS 2022 / v17): windows-latest moved to the
+          # windows-2025 image whose VS 18 preview current node-gyp can't
+          # detect. Pin until node-gyp gains v18 support.
+          - os: windows-2022
             archs: x64
     runs-on: ${{ matrix.os }}
     steps:

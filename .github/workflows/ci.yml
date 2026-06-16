@@ -21,7 +21,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        # windows-2022 (VS 2022 / v17) — windows-latest now maps to the
+        # windows-2025 image, which ships a VS 18 preview that current
+        # node-gyp can't detect (its PowerShell VS finder overflows the
+        # child-process buffer and the fallback can't parse major v18).
+        os: [macos-latest, windows-2022]
         node: ['18', '20', '22']
     runs-on: ${{ matrix.os }}
     steps:
