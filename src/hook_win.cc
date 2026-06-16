@@ -213,7 +213,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   std::string non_text = KeycodeConverter::NonPrintableKeyFromCode(ev.code);
   if (!non_text.empty()) {
     ev.key = non_text;
-  } else if (ev.is_down) {
+  } else {
+    // Compute the character for BOTH keydown and keyup. A DOM keyup carries
+    // the same `key` as its keydown (Chrome reports key="f" on releasing F);
+    // gating this on is_down left keyup events with an empty key. ToUnicodeEx
+    // is called with the "don't change kernel state" flag, so probing on
+    // keyup is side-effect free. (The macOS path already does both.)
     HKL layout = PickActiveLayout(kb->vkCode, scan_full);
 
     // Reconstruct keyboard state from real-time physical keys instead of
