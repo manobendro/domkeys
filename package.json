@@ -58,11 +58,13 @@
     "node-gyp-build": "^4.8.4"
   },
   "devDependencies": {
-    "node-gyp": "^10.2.0",
+    "node-gyp": "^11.5.0",
     "prebuildify": "^6.0.1"
   },
   "binary": {
-    "napi_versions": [8]
+    "napi_versions": [
+      8
+    ]
   },
   "os": [
     "darwin",
