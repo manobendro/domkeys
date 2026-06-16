@@ -29,16 +29,57 @@ bool DebugEnabled() {
   return enabled;
 }
 
-// Last layout identified by an unambiguous scan->VK fingerprint match.
-// Letters like physical Q (AZERTY->VK_A, US->VK_Q) resolve to exactly one
-// HKL and update this cache; layout-universal keys (digits, space, modifiers)
-// fall back to it for disambiguation.
-std::atomic<HKL> g_layout_cache{nullptr};
+// Per-HWND layout state.
+//
+// `pinned` is the layout last identified by an unambiguous scan->VK
+// fingerprint match while this HWND was foreground (ground truth: the
+// kernel told us exactly which layout it used for that keystroke).
+//
+// `last_fg_hkl` is the foreground-thread HKL we observed for this HWND
+// on its previous event. When we see it change, the user switched the
+// layout for this app (e.g. via taskbar / Win+Space while focused), so
+// the pin is no longer valid and we clear it. Ambiguous-key lookups
+// then fall back to the fresh fg-hkl until a new unique match re-pins.
+//
+// Global caching would conflate apps/layouts: a French pin from one
+// app would override a fresh Arabic fg-hkl in another, or after a
+// switch within the same app. Per-HWND + change detection avoids both.
+struct HwndLayoutState {
+  HWND hwnd = nullptr;
+  HKL last_fg_hkl = nullptr;
+  HKL pinned = nullptr;
+};
+
+constexpr int kMaxHwndStates = 16;
+std::mutex g_hwnd_mu;
+HwndLayoutState g_hwnd_states[kMaxHwndStates];
+int g_hwnd_next_slot = 0;
+
+// Caller holds g_hwnd_mu. Returns the slot for `h`, evicting the oldest
+// (FIFO) if `h` isn't already tracked. Bounded memory, no STL needed.
+HwndLayoutState* GetHwndState(HWND h) {
+  for (int i = 0; i < kMaxHwndStates; ++i) {
+    if (g_hwnd_states[i].hwnd == h) return &g_hwnd_states[i];
+  }
+  HwndLayoutState* slot = &g_hwnd_states[g_hwnd_next_slot];
+  g_hwnd_next_slot = (g_hwnd_next_slot + 1) % kMaxHwndStates;
+  slot->hwnd = h;
+  slot->last_fg_hkl = nullptr;
+  slot->pinned = nullptr;
+  return slot;
+}
 
 // Walks loaded HKLs, finds those whose own scan->VK mapping agrees with
-// kb->vkCode, and picks one. Single match wins outright (and updates the
-// cache). For ambiguous matches (digits / space / other layout-universal
-// keys) we prefer cache -> foreground-thread HKL -> first match.
+// kb->vkCode, and picks one.
+//
+// Unique match: that's ground truth - use it and pin it on the current
+// HWND's state for future ambiguous keys in this window.
+//
+// Ambiguous match (digits, most letters under layouts that don't remap
+// scan->VK like Arabic does for chars but not VKs): prefer the HWND's
+// pin -> the foreground-thread HKL -> the first match. The HWND's pin
+// is auto-invalidated above if fg-hkl changed since the last event for
+// the same HWND (= the user switched layouts on this app).
 HKL PickActiveLayout(WORD vk, UINT scan_full) {
   HKL layouts[16] = {0};
   int n_layouts = GetKeyboardLayoutList(16, layouts);
@@ -51,24 +92,39 @@ HKL PickActiveLayout(WORD vk, UINT scan_full) {
     }
   }
 
-  HKL cached = g_layout_cache.load();
-  HKL fg_hkl = nullptr;
   HWND fg = GetForegroundWindow();
+  HKL fg_hkl = nullptr;
   if (fg) {
     DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
     if (fg_tid) fg_hkl = GetKeyboardLayout(fg_tid);
   }
 
+  HKL pinned = nullptr;
+  if (fg) {
+    std::lock_guard<std::mutex> lk(g_hwnd_mu);
+    HwndLayoutState* state = GetHwndState(fg);
+    // Detect layout switch for this HWND: fg-hkl changed since last visit.
+    if (state->last_fg_hkl != nullptr && state->last_fg_hkl != fg_hkl) {
+      state->pinned = nullptr;
+    }
+    state->last_fg_hkl = fg_hkl;
+    pinned = state->pinned;
+  }
+
   HKL chosen = nullptr;
   const char* path = nullptr;
   if (n_matches == 1) {
-    g_layout_cache.store(matches[0]);
     chosen = matches[0];
     path = "fingerprint-unique";
+    if (fg) {
+      std::lock_guard<std::mutex> lk(g_hwnd_mu);
+      HwndLayoutState* state = GetHwndState(fg);
+      state->pinned = chosen;
+    }
   } else if (n_matches > 1) {
-    if (cached) {
+    if (pinned) {
       for (int i = 0; i < n_matches; ++i) {
-        if (matches[i] == cached) { chosen = cached; path = "cache"; break; }
+        if (matches[i] == pinned) { chosen = pinned; path = "hwnd-pin"; break; }
       }
     }
     if (!chosen && fg_hkl) {
@@ -85,9 +141,9 @@ HKL PickActiveLayout(WORD vk, UINT scan_full) {
   if (DebugEnabled()) {
     std::fprintf(stderr,
         "[domkeys] vk=0x%02X scan=0x%04X n_layouts=%d n_matches=%d "
-        "cache=%p fg=%p chosen=%p via=%s ; ",
+        "pin=%p fg=%p chosen=%p via=%s ; ",
         vk, scan_full, n_layouts, n_matches,
-        (void*)cached, (void*)fg_hkl, (void*)chosen, path);
+        (void*)pinned, (void*)fg_hkl, (void*)chosen, path);
     std::fprintf(stderr, "layouts=[");
     for (int i = 0; i < n_layouts; ++i) {
       UINT v = MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]);
