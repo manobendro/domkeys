@@ -222,9 +222,20 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     HKL layout = PickActiveLayout(kb->vkCode, scan_full);
 
     // Reconstruct keyboard state from real-time physical keys instead of
-    // reading our thread's stale queue (GetKeyboardState).
+    // reading our thread's stale queue (GetKeyboardState). ToUnicodeEx reads
+    // this array only to resolve the shift state — the key being translated
+    // is passed explicitly as translated_vk — so we query just the modifier
+    // and toggle keys rather than all 256 VKs. This runs on every printable
+    // keydown *and* keyup, so the smaller set keeps that path cheap. AltGr
+    // still works: it sets the generic VK_CONTROL + VK_MENU bits below.
     BYTE keystate[256] = {0};
-    for (int vk = 0; vk < 256; ++vk) {
+    static const int kModifierVks[] = {
+        VK_SHIFT,   VK_LSHIFT,   VK_RSHIFT,    // Shift
+        VK_CONTROL, VK_LCONTROL, VK_RCONTROL,  // Ctrl (and AltGr's Ctrl half)
+        VK_MENU,    VK_LMENU,    VK_RMENU,      // Alt / AltGr
+        VK_KANA,                               // Japanese / Korean kana
+    };
+    for (int vk : kModifierVks) {
       if (GetAsyncKeyState(vk) & 0x8000) keystate[vk] = 0x80;
     }
     // Toggle bits for lock keys are system-wide, safe to query directly.
