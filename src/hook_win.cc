@@ -3,6 +3,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -19,6 +21,142 @@ DWORD g_thread_id = 0;
 HHOOK g_hook = nullptr;
 EventCallback g_callback;
 std::mutex g_callback_mu;
+
+bool DebugEnabled() {
+  static const bool enabled = []() {
+    const char* v = std::getenv("DOMKEYS_DEBUG_WIN");
+    return v && v[0] && v[0] != '0';
+  }();
+  return enabled;
+}
+
+// Per-HWND layout state.
+//
+// `pinned` is the layout last identified by an unambiguous scan->VK
+// fingerprint match while this HWND was foreground (ground truth: the
+// kernel told us exactly which layout it used for that keystroke).
+//
+// `last_fg_hkl` is the foreground-thread HKL we observed for this HWND
+// on its previous event. When we see it change, the user switched the
+// layout for this app (e.g. via taskbar / Win+Space while focused), so
+// the pin is no longer valid and we clear it. Ambiguous-key lookups
+// then fall back to the fresh fg-hkl until a new unique match re-pins.
+//
+// Global caching would conflate apps/layouts: a French pin from one
+// app would override a fresh Arabic fg-hkl in another, or after a
+// switch within the same app. Per-HWND + change detection avoids both.
+struct HwndLayoutState {
+  HWND hwnd = nullptr;
+  HKL last_fg_hkl = nullptr;
+  HKL pinned = nullptr;
+};
+
+constexpr int kMaxHwndStates = 16;
+std::mutex g_hwnd_mu;
+HwndLayoutState g_hwnd_states[kMaxHwndStates];
+int g_hwnd_next_slot = 0;
+
+// Caller holds g_hwnd_mu. Returns the slot for `h`, evicting the oldest
+// (FIFO) if `h` isn't already tracked. Bounded memory, no STL needed.
+HwndLayoutState* GetHwndState(HWND h) {
+  for (int i = 0; i < kMaxHwndStates; ++i) {
+    if (g_hwnd_states[i].hwnd == h) return &g_hwnd_states[i];
+  }
+  HwndLayoutState* slot = &g_hwnd_states[g_hwnd_next_slot];
+  g_hwnd_next_slot = (g_hwnd_next_slot + 1) % kMaxHwndStates;
+  slot->hwnd = h;
+  slot->last_fg_hkl = nullptr;
+  slot->pinned = nullptr;
+  return slot;
+}
+
+// Walks loaded HKLs, finds those whose own scan->VK mapping agrees with
+// kb->vkCode, and picks one.
+//
+// Unique match: that's ground truth - use it and pin it on the current
+// HWND's state for future ambiguous keys in this window.
+//
+// Ambiguous match (digits, most letters under layouts that don't remap
+// scan->VK like Arabic does for chars but not VKs): prefer the HWND's
+// pin -> the foreground-thread HKL -> the first match. The HWND's pin
+// is auto-invalidated above if fg-hkl changed since the last event for
+// the same HWND (= the user switched layouts on this app).
+HKL PickActiveLayout(WORD vk, UINT scan_full) {
+  HKL layouts[16] = {0};
+  int n_layouts = GetKeyboardLayoutList(16, layouts);
+
+  HKL matches[16] = {0};
+  int n_matches = 0;
+  for (int i = 0; i < n_layouts; ++i) {
+    if (MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]) == vk) {
+      matches[n_matches++] = layouts[i];
+    }
+  }
+
+  HWND fg = GetForegroundWindow();
+  HKL fg_hkl = nullptr;
+  if (fg) {
+    DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
+    if (fg_tid) fg_hkl = GetKeyboardLayout(fg_tid);
+  }
+
+  HKL pinned = nullptr;
+  if (fg) {
+    std::lock_guard<std::mutex> lk(g_hwnd_mu);
+    HwndLayoutState* state = GetHwndState(fg);
+    // Detect layout switch for this HWND: fg-hkl changed since last visit.
+    if (state->last_fg_hkl != nullptr && state->last_fg_hkl != fg_hkl) {
+      state->pinned = nullptr;
+    }
+    state->last_fg_hkl = fg_hkl;
+    pinned = state->pinned;
+  }
+
+  HKL chosen = nullptr;
+  const char* path = nullptr;
+  if (n_matches == 1) {
+    chosen = matches[0];
+    path = "fingerprint-unique";
+    if (fg) {
+      std::lock_guard<std::mutex> lk(g_hwnd_mu);
+      HwndLayoutState* state = GetHwndState(fg);
+      state->pinned = chosen;
+    }
+  } else if (n_matches > 1) {
+    if (pinned) {
+      for (int i = 0; i < n_matches; ++i) {
+        if (matches[i] == pinned) { chosen = pinned; path = "hwnd-pin"; break; }
+      }
+    }
+    if (!chosen && fg_hkl) {
+      for (int i = 0; i < n_matches; ++i) {
+        if (matches[i] == fg_hkl) { chosen = fg_hkl; path = "fg-hkl"; break; }
+      }
+    }
+    if (!chosen) { chosen = matches[0]; path = "first-match"; }
+  } else {
+    chosen = fg_hkl ? fg_hkl : GetKeyboardLayout(0);
+    path = "no-match-fallback";
+  }
+
+  if (DebugEnabled()) {
+    std::fprintf(stderr,
+        "[domkeys] vk=0x%02X scan=0x%04X n_layouts=%d n_matches=%d "
+        "pin=%p fg=%p chosen=%p via=%s ; ",
+        vk, scan_full, n_layouts, n_matches,
+        (void*)pinned, (void*)fg_hkl, (void*)chosen, path);
+    std::fprintf(stderr, "layouts=[");
+    for (int i = 0; i < n_layouts; ++i) {
+      UINT v = MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]);
+      std::fprintf(stderr, "%s%p:vk=0x%02X", i ? "," : "",
+                   (void*)layouts[i], v);
+    }
+    std::fprintf(stderr, "]\n");
+    std::fflush(stderr);
+  }
+
+  return chosen;
+}
 
 // SetWindowsHookExW runs on the worker thread, so its success/failure has to
 // be reported back to StartHook before it returns — otherwise a failed install
@@ -76,15 +214,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (!non_text.empty()) {
     ev.key = non_text;
   } else if (ev.is_down) {
-    // Layout + state must come from the *foreground* app, not our hook
-    // thread — otherwise layout switches in the user's app are invisible.
-    HKL layout = nullptr;
-    HWND fg = GetForegroundWindow();
-    if (fg) {
-      DWORD fg_tid = GetWindowThreadProcessId(fg, nullptr);
-      if (fg_tid) layout = GetKeyboardLayout(fg_tid);
-    }
-    if (!layout) layout = GetKeyboardLayout(0);
+    HKL layout = PickActiveLayout(kb->vkCode, scan_full);
 
     // Reconstruct keyboard state from real-time physical keys instead of
     // reading our thread's stale queue (GetKeyboardState).
@@ -97,11 +227,22 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (GetKeyState(VK_NUMLOCK) & 0x0001) keystate[VK_NUMLOCK] |= 0x01;
     if (GetKeyState(VK_SCROLL)  & 0x0001) keystate[VK_SCROLL]  |= 0x01;
 
+    // vkCode in KBDLLHOOKSTRUCT comes from the kernel's scan->VK mapping
+    // using *our* process's keyboard layout (typically US), not the
+    // foreground app's active layout. For VK_A..VK_Z that's harmless
+    // (those codes are universal). For layout-specific OEM VKs
+    // (VK_OEM_PERIOD, VK_OEM_2, VK_OEM_3 ...) it breaks symbols, because
+    // AZERTY/QWERTZ/etc. assign different OEM codes to the same physical
+    // keys. Re-translate the hardware scan code through the active HKL
+    // so the VK we hand to ToUnicodeEx matches the layout it'll consult.
+    UINT translated_vk = MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layout);
+    if (translated_vk == 0) translated_vk = kb->vkCode;
+
     // Bit 2 in wFlags (Win10 1607+) = "do not change kernel keyboard state".
     // Critical: without this we'd consume the foreground app's pending dead
     // key on layouts like US-International, breaking composition there.
     wchar_t buf[8] = {0};
-    int n = ToUnicodeEx(kb->vkCode, kb->scanCode, keystate, buf,
+    int n = ToUnicodeEx(translated_vk, kb->scanCode, keystate, buf,
                         sizeof(buf) / sizeof(buf[0]), 1 << 2, layout);
     if (n > 0) {
       char utf8[32] = {0};
@@ -163,9 +304,18 @@ bool StartHook(EventCallback cb) {
     std::lock_guard<std::mutex> lk(g_callback_mu);
     g_callback = std::move(cb);
   }
+  // Reset the install-result state before (re)starting the worker so this
+  // start() can't observe a stale kOk/kFailed left by a previous run.
   {
     std::lock_guard<std::mutex> lk(g_start_mu);
     g_start_state = StartState::kPending;
+  }
+  // We intentionally do NOT seed a foreground-thread HKL here: a stale HKL
+  // would beat the fresh fg-hkl lookup for layout-universal keys. The
+  // per-HWND layout state populates itself from real keystrokes instead.
+  if (DebugEnabled()) {
+    std::fprintf(stderr, "[domkeys] debug enabled\n");
+    std::fflush(stderr);
   }
   g_thread = std::thread(RunHookThread);
 

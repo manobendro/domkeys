@@ -233,7 +233,7 @@ If your product needs IME-aware text capture, prompt users to disable IME compos
 |----------------------------------------|------------------|
 | Listen vs. consume events              | macOS: `kCGEventTapOptionListenOnly`. Windows: always `CallNextHookEx`. |
 | Dead-key state in the foreground app   | Windows: `ToUnicodeEx` is called with the "do not change kernel state" flag (bit 2, Win10 1607+). The foreground app's pending dead key is not consumed. |
-| Foreground app's keyboard layout       | Windows: layout queried via `GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), …))`, not the hook thread's stale HKL. |
+| Foreground app's keyboard layout       | Windows: layout taken from `GetKeyboardLayoutList(...)[0]` — Windows moves the just-activated HKL to the head of that list, so taskbar / Win+Space switches are picked up even when the foreground host (Windows Terminal, modern Electron) routes input through TSF and skips `WM_INPUTLANGCHANGE`. Falls back to the foreground-thread HKL and then to the current thread. |
 | Modifier state                         | Windows: reconstructed from real-time `GetAsyncKeyState` rather than the hook thread's queue. |
 | Focus / message-queue intrusion        | `AttachThreadInput` is **never** called — its side effects on focus and message dispatch make it unsuitable for non-intrusive hooks. |
 | Hook performance                       | NAPI `ThreadSafeFunction` with non-blocking enqueue. Hook thread returns to the OS in microseconds. |
