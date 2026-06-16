@@ -107,6 +107,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         utf8[u8] = '\0';
         ev.key = utf8;
       }
+    } else if (n < 0) {
+      // ToUnicodeEx returns -1 for a dead key (e.g. ^ ` ~ ¨ on the
+      // International / many European layouts). Chromium reports these as
+      // key="Dead"; emit the same rather than leaving key empty so callers
+      // can tell a dead key apart from an unmapped one.
+      ev.key = "Dead";
     }
   }
 
