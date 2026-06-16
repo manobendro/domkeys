@@ -159,6 +159,7 @@ interface KeyEvent {
   metaKey: boolean;   // Cmd on macOS, Win key on Windows
   capsLock: boolean;
   repeat: boolean;    // mac: OS auto-repeat; win: always false (not exposed by LL hook)
+  injected: boolean;  // win: LLKHF_INJECTED (SendInput, RDP/VM, remappers). mac: false.
   nativeKeyCode: number;   // mac: Carbon VK (0–127). win: VK code.
   nativeScanCode: number;  // win: scan code with 0xE0/0xE1 extended prefix. mac: 0.
 }
@@ -242,6 +243,7 @@ If your product needs IME-aware text capture, prompt users to disable IME compos
 ## Limitations
 
 - **Repeat detection on Windows** — `WH_KEYBOARD_LL` doesn't expose an auto-repeat flag. `ev.repeat` is always `false` on Windows. (Detecting repeat would need per-VK state tracking; not currently implemented.)
+- **Injected / synthetic events** — RDP and VM guest tools, and key remappers (PowerToys Keyboard Manager, AutoHotkey), deliver input synthetically. On Windows these set `ev.injected = true` — notably, a *held* modifier under RDP/VM often arrives as a stream of down/up pairs. The hook reports them rather than dropping them (a VM injects *all* input); filter with `if (ev.injected) return` if you only want physical keys. `ev.injected` is always `false` on macOS.
 - **IME composition** — see [Keyboard layouts & IME](#keyboard-layouts--ime). Structural to all global hooks.
 - **Dead-key composition** — see same section. `key` reports raw keys for dead-key layouts.
 - **Pause/Break on Windows** — the key sends a 0xE1-prefixed two-event sequence; only the first half is currently mapped.

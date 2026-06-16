@@ -28,6 +28,7 @@ void Dispatch(Napi::Env env, Napi::Function jsCallback,
   obj.Set("metaKey", ev->meta);
   obj.Set("capsLock", ev->caps_lock);
   obj.Set("repeat", ev->repeat);
+  obj.Set("injected", ev->injected);
   obj.Set("nativeKeyCode", static_cast<double>(ev->native_keycode));
   obj.Set("nativeScanCode", static_cast<double>(ev->native_scancode));
   jsCallback.Call({obj});
