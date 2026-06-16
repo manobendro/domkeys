@@ -3,6 +3,7 @@
 #include <Carbon/Carbon.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <thread>
@@ -21,6 +22,15 @@ CFMachPortRef g_tap = nullptr;
 CFRunLoopSourceRef g_source = nullptr;
 EventCallback g_callback;
 std::mutex g_callback_mu;
+
+// g_runloop is assigned on the worker thread but read by StopHook on the
+// caller thread. Without synchronization a stop() that races a just-started
+// hook can observe g_runloop == nullptr, skip CFRunLoopStop, and then block
+// forever in g_thread.join() (the run loop is left running). Gate the read on
+// the worker signalling that the run loop is live.
+std::mutex g_runloop_mu;
+std::condition_variable g_runloop_cv;
+bool g_runloop_ready = false;
 
 // Per-side device modifier bits used to distinguish ShiftLeft vs ShiftRight.
 // Values come from IOKit's NX_DEVICE*KEYMASK constants — Carbon does not give
@@ -125,6 +135,14 @@ void RunHookThread() {
     g_source = CFMachPortCreateRunLoopSource(nullptr, g_tap, 0);
     CFRunLoopAddSource(g_runloop, g_source, kCFRunLoopCommonModes);
     CGEventTapEnable(g_tap, true);
+
+    // Publish the live run loop so a concurrent StopHook can stop it safely.
+    {
+      std::lock_guard<std::mutex> lk(g_runloop_mu);
+      g_runloop_ready = true;
+    }
+    g_runloop_cv.notify_all();
+
     CFRunLoopRun();
 
     CGEventTapEnable(g_tap, false);
@@ -133,7 +151,11 @@ void RunHookThread() {
     CFRelease(g_tap);
     g_source = nullptr;
     g_tap = nullptr;
-    g_runloop = nullptr;
+    {
+      std::lock_guard<std::mutex> lk(g_runloop_mu);
+      g_runloop = nullptr;
+      g_runloop_ready = false;
+    }
   }
 }
 
@@ -160,14 +182,25 @@ bool StartHook(EventCallback cb) {
     return false;
   }
 
+  {
+    std::lock_guard<std::mutex> lk(g_runloop_mu);
+    g_runloop_ready = false;
+  }
   g_thread = std::thread(RunHookThread);
   return true;
 }
 
 void StopHook() {
   if (!g_running.exchange(false)) return;
-  // Snapshot before the worker clears these on exit.
-  CFRunLoopRef rl = g_runloop;
+  // Wait until the worker has published a live run loop, then stop it. The
+  // tap was created successfully in StartHook, so the worker is guaranteed to
+  // reach the ready signal — this can't deadlock.
+  CFRunLoopRef rl = nullptr;
+  {
+    std::unique_lock<std::mutex> lk(g_runloop_mu);
+    g_runloop_cv.wait(lk, [] { return g_runloop_ready; });
+    rl = g_runloop;
+  }
   if (rl) CFRunLoopStop(rl);
   if (g_thread.joinable()) g_thread.join();
   std::lock_guard<std::mutex> lk(g_callback_mu);
