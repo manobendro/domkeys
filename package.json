@@ -1,6 +1,6 @@
 {
   "name": "domkeys",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Native Node.js NAPI keyboard hook (macOS + Windows) with Chromium-style keycode conversion.",
   "author": {
     "name": "Manob Biswas",
