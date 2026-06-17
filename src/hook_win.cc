@@ -3,8 +3,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -21,14 +19,6 @@ DWORD g_thread_id = 0;
 HHOOK g_hook = nullptr;
 EventCallback g_callback;
 std::mutex g_callback_mu;
-
-bool DebugEnabled() {
-  static const bool enabled = []() {
-    const char* v = std::getenv("DOMKEYS_DEBUG_WIN");
-    return v && v[0] && v[0] != '0';
-  }();
-  return enabled;
-}
 
 // Per-HWND layout state.
 //
@@ -113,10 +103,8 @@ HKL PickActiveLayout(WORD vk, UINT scan_full) {
   }
 
   HKL chosen = nullptr;
-  const char* path = nullptr;
   if (n_matches == 1) {
     chosen = matches[0];
-    path = "fingerprint-unique";
     if (fg) {
       std::lock_guard<std::mutex> lk(g_hwnd_mu);
       HwndLayoutState* state = GetHwndState(fg);
@@ -125,34 +113,17 @@ HKL PickActiveLayout(WORD vk, UINT scan_full) {
   } else if (n_matches > 1) {
     if (pinned) {
       for (int i = 0; i < n_matches; ++i) {
-        if (matches[i] == pinned) { chosen = pinned; path = "hwnd-pin"; break; }
+        if (matches[i] == pinned) { chosen = pinned; break; }
       }
     }
     if (!chosen && fg_hkl) {
       for (int i = 0; i < n_matches; ++i) {
-        if (matches[i] == fg_hkl) { chosen = fg_hkl; path = "fg-hkl"; break; }
+        if (matches[i] == fg_hkl) { chosen = fg_hkl; break; }
       }
     }
-    if (!chosen) { chosen = matches[0]; path = "first-match"; }
+    if (!chosen) chosen = matches[0];
   } else {
     chosen = fg_hkl ? fg_hkl : GetKeyboardLayout(0);
-    path = "no-match-fallback";
-  }
-
-  if (DebugEnabled()) {
-    std::fprintf(stderr,
-        "[domkeys] vk=0x%02X scan=0x%04X n_layouts=%d n_matches=%d "
-        "pin=%p fg=%p chosen=%p via=%s ; ",
-        vk, scan_full, n_layouts, n_matches,
-        (void*)pinned, (void*)fg_hkl, (void*)chosen, path);
-    std::fprintf(stderr, "layouts=[");
-    for (int i = 0; i < n_layouts; ++i) {
-      UINT v = MapVirtualKeyExW(scan_full, MAPVK_VSC_TO_VK_EX, layouts[i]);
-      std::fprintf(stderr, "%s%p:vk=0x%02X", i ? "," : "",
-                   (void*)layouts[i], v);
-    }
-    std::fprintf(stderr, "]\n");
-    std::fflush(stderr);
   }
 
   return chosen;
@@ -329,10 +300,6 @@ bool StartHook(EventCallback cb) {
   // We intentionally do NOT seed a foreground-thread HKL here: a stale HKL
   // would beat the fresh fg-hkl lookup for layout-universal keys. The
   // per-HWND layout state populates itself from real keystrokes instead.
-  if (DebugEnabled()) {
-    std::fprintf(stderr, "[domkeys] debug enabled\n");
-    std::fflush(stderr);
-  }
   g_thread = std::thread(RunHookThread);
 
   // Block until the worker reports whether the hook actually installed. The
